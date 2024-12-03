@@ -1,0 +1,451 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use constant PI => 3.14159265358979323846;
+
+###########################################################
+# Assignment.
+# Write a Perl program that calculates torsion angles for DNA and RNA
+# macromolecules. Compute the following angles: alpha, beta.
+
+# Documentation.
+# PNA, α , γ. Jasiński, M. et al. (2018) Improved force fields for peptide
+# nucleic acids with optimized backbone torsion parameters.
+# Journal of Chemical Theory and Computation 14(7), 3603-3620.
+# American Chemical Society (ACS).
+# DOI: https://doi.org/10.1021/acs.jctc.8b00291
+
+# I found the exact torsion angle definitions in a separate publication,
+# where it says: "Torsion angle (deg) definitions:  α = C‘−N1‘−C2‘−C3‘;
+# β = N1‘−C2‘−C3‘−N4‘; γ = C2‘−C3‘−N4‘−C5‘"
+# Petersson, B. et al. (2005) Crystal Structure of a Partly Self-Complementary
+# Peptide Nucleic Acid (PNA) Oligomer Showing a Duplex−Triplex Network.
+# Journal of the American Chemical Society 127(5), 1424–1430.
+# American Chemical Society (ACS). DOI: https://doi.org/10.1021/ja0458726
+
+# How to run:
+# ./pdbx-PNA-torsion-AY filename.pdb (or .cif) 
+
+# Running the program in this way will output a standard csv table:
+# ./pdbx-PNA-torsion-AY filename.cif |  tail -n +2 > output.csv
+# Or it can be outputted directly to the command line:
+# ./pdbx-PNA-torsion-AY filename.cif |  tail -n +2
+
+###########################################################
+# Program id. Generated with command
+# svn propset svn:keywords "Id" pdbx-PNA-torsion-AY
+
+my $program_id = '$Id: pdbx-PNA-torsion-AY 5 2024-06-02 18:57:45Z emilija $';
+
+# Change "$" to "#" in ID
+$program_id =~ s/\$/#/;
+
+# Remove "$" from the last part of line
+$program_id =~ s/\$//;
+
+print "$program_id\n";
+
+print "keyword\tangle1\tangle2\tDATAID\tchain\tresname\tresnum\tfile\n";
+
+# Process each file provided as an argument
+foreach my $filename (@ARGV) {
+	open(my $fh_in, '<', $filename) or die "Could not open file '$filename': $!";
+
+	# Initialize DATAID and format
+	my $DATAID = "-";
+	my $format = "Unknown";
+
+	while (my $line = <$fh_in>) {
+		chomp $line;
+		# Reset format to Unknown after processing each line
+		$format = "Unknown";
+		# Determine the format based on the line content
+		if ($line =~ /^HEADER/ || $line =~ /^CRYST1/) {
+			$format = "PDB";
+		if ($line =~ /^HEADER/) {
+			$DATAID = (split /\s+/, $line)[-1];
+		}
+
+		} elsif ($line =~ /^data_(\w+)/) {
+			$format = "PDBx";
+			$DATAID = $1;
+		}
+
+		# Process the line based on the detected format
+		if ($format eq "PDB") {
+			process_pdb_line($fh_in, $filename, $DATAID);
+		} elsif ($format eq "PDBx") {
+			process_cif_line($fh_in, $filename, $DATAID);
+		} else {
+			print "No valid format detected in the file: $filename\n";
+		}
+        
+	}
+
+	close($fh_in);
+}
+
+
+
+# I decided to do separate subroutines for pdb and cif files 
+# because they use a different column
+# to keep the atom names in them. These subroutines only
+# look for specific names, the rest of the processing is in a different 
+# subroutine.
+
+# Subroutine for finding the needed lines in a pdb file:
+sub extract_specific_atom_lines_pdb {
+	my ($fh_in) = @_;
+	my (@matched_lines_a, @matched_lines_y);
+	my %specific_atoms_a = (
+		"C'"   => 0,
+		"N1'" => 0,
+		"C2'" => 0,
+		"C3'" => 0
+	);
+	my %specific_atoms_y = (
+		"C2'" => 0,
+		"C3'" => 0,
+		"N4'" => 0,
+		"C5'" => 0
+	);
+
+	my @current_combination_a;
+	my @current_combination_y;
+
+	# Read lines until the required atoms are found in a row
+	while (my $line = <$fh_in>) {
+		chomp $line;
+
+		# Read lines with HETATM at the start
+		if ($line =~ /^(ATOM|HETATM)/) {
+			my @columns = split /\s+/, $line;
+			
+			# Join the columns with a tab separator
+			$line = join "\t", @columns;
+			
+			my $atom_name = $columns[2];
+			
+			# Check for the first combination
+			if (exists $specific_atoms_a{$atom_name}) {
+				push @current_combination_a, $line;
+				$specific_atoms_a{$atom_name} = 1;
+				# Reset the current combination
+			} else {
+				@current_combination_a = ();
+			}
+
+			if (scalar @current_combination_a == 4) {
+				push @matched_lines_a, [ 
+					@current_combination_a 
+				];
+				@current_combination_a = ();
+			}
+			# Check for the second combination
+			if (exists $specific_atoms_y{$atom_name}) {
+				push @current_combination_y, $line;
+				$specific_atoms_y{$atom_name} = 1;
+			} else {
+				@current_combination_y = ();
+			}
+
+			if (scalar @current_combination_y == 4) {
+				push @matched_lines_y, [ 
+					@current_combination_y 
+				];
+
+				@current_combination_y = ();
+			}
+		}
+	}
+
+	return (\@matched_lines_a, \@matched_lines_y);
+}
+
+
+# Subroutine for finding the needed lines in a cif file:
+sub extract_specific_atom_lines_cif {
+	my ($fh_in) = @_;
+	my (@matched_lines_a, @matched_lines_y);
+	my %specific_atoms_a = (
+		"\"C'\""  => 0,
+		"\"N1'\"" => 0,
+		"\"C2'\"" => 0,
+		"\"C3'\"" => 0
+	);
+	my %specific_atoms_y = (
+		"\"C2'\"" => 0,
+		"\"C3'\"" => 0,
+		"\"N4'\"" => 0,
+		"\"C5'\"" => 0
+	);
+
+	my @current_combination_a;
+	my @current_combination_y;
+
+	# Read lines until the required atoms are found in a row
+	while (my $line = <$fh_in>) {
+		chomp $line;
+
+		# Read lines with HETATM at the start
+		if ($line =~ /^(HETATM)/) {
+        
+			my @columns = split /\s+/, $line;
+			# Join the columns with a tab separator
+			$line = join "\t", @columns; 
+            
+			# Check for the first combination
+			if (exists $specific_atoms_a{$columns[3]}) {
+				push @current_combination_a, $line;
+				$specific_atoms_a{$columns[3]} = 1;
+			}
+			else {
+				# Reset the current combination
+				@current_combination_a = ();
+			}
+
+			# Check for the second combination
+			if (exists $specific_atoms_y{$columns[3]}) {
+				push @current_combination_y, $line;
+				$specific_atoms_y{$columns[3]} = 1;
+			}
+			else {
+				# Reset the current combination
+				@current_combination_y = ();
+			}
+
+			# Add the combinations to the matched lines arrays
+			if (scalar @current_combination_a == 4) {
+				push @matched_lines_a, [ 
+					@current_combination_a 
+				];
+				@current_combination_a = ();
+			}
+
+			if (scalar @current_combination_y == 4) {
+				push @matched_lines_y, [
+					@current_combination_y
+				];
+				@current_combination_y = ();
+			}
+		}
+	}
+	return (\@matched_lines_a, \@matched_lines_y);
+}
+
+sub acos {
+	my ($x) = @_;
+	my $precision = 1e-10;
+	my $res = 0;
+	my $term = $x;
+	my $n = 1;
+	while (abs($term) > $precision) {
+		$res += $term;
+		$term *= (-$x * $x * $n * $n) / (($n + 1) * ($n + 2));
+		$n += 2;
+	}
+	return PI / 2 - $res;
+}
+
+# Function to calculate the angle between three points
+sub calculate_angle {
+	my ($p1, $p2, $p3, $p4) = @_;
+
+	# Calculate vectors
+	my @v1 = ($p1->[0] - $p2->[0], $p1->[1] - $p2->[1], $p1->[2] - $p2->[2]);
+	my @v2 = ($p2->[0] - $p3->[0], $p2->[1] - $p3->[1], $p2->[2] - $p3->[2]);
+	my @v3 = ($p3->[0] - $p4->[0], $p3->[1] - $p4->[1], $p3->[2] - $p4->[2]);
+
+	# Calculate cross products
+	my @n1 = cross_product(\@v1, \@v2);
+	my @n2 = cross_product(\@v2, \@v3);
+
+	# Normalize normal vectors
+	my $mag_n1 = sqrt($n1[0]**2 + $n1[1]**2 + $n1[2]**2);
+	my $mag_n2 = sqrt($n2[0]**2 + $n2[1]**2 + $n2[2]**2);
+
+	my ($nx1, $ny1, $nz1) = (
+		$n1[0] / $mag_n1,
+		$n1[1] / $mag_n1,
+		$n1[2] / $mag_n1
+	);
+
+	my ($nx2, $ny2, $nz2) = (
+		$n2[0] / $mag_n2,
+		$n2[1] / $mag_n2,
+		$n2[2] / $mag_n2
+	);
+
+	# Calculate dot product
+	my $dot_product = $nx1 * $nx2 + $ny1 * $ny2 + $nz1 * $nz2;
+
+	# Calculate angle in radians
+	my $angle_rad = acos($dot_product);
+
+	# Convert angle to degrees and round to two decimal places
+	my $angle_deg = sprintf("%.2f", $angle_rad * 180 / PI);
+
+	return $angle_deg;
+}
+
+sub cross_product {
+	my ($vec1, $vec2) = @_;
+
+	my $cx = $vec1->[1] * $vec2->[2] - $vec1->[2] * $vec2->[1];
+	my $cy = $vec1->[2] * $vec2->[0] - $vec1->[0] * $vec2->[2];
+	my $cz = $vec1->[0] * $vec2->[1] - $vec1->[1] * $vec2->[0];
+
+	return ($cx, $cy, $cz);
+}
+
+
+
+# Next, subroutines for finding the rest
+# of the data and calculating the angles.
+
+sub process_cif_line {
+	my ($fh_in, $filename, $DATAID) = @_;
+	my $line = <$fh_in>;
+	my ($angle1, $angle2, $chain, $resname, $resnum) = (
+		'-', '-', '-', '-', '-'
+	);
+	my ($split_matched_lines_a, $split_matched_lines_y) = 
+		extract_specific_atom_lines_cif($fh_in);
+
+	foreach my $combination (@$split_matched_lines_a) {
+		($chain, $resname, $resnum) = ('', '', '');
+		if ($combination) {
+			my $line = $combination->[0];
+			my @line_columns = split("\t", $line);
+			$resnum = $line_columns[16];
+			$resname = $line_columns[5];
+			$chain = $line_columns[6];
+			my @coordinates = ();
+			foreach my $line (@$combination) {
+				my @fields = split /\s+/, $line;
+				my ($x, $y, $z) = @fields[10, 11, 12];
+				push @coordinates, [$x, $y, $z];
+			}
+
+			my $angle1 = calculate_angle(
+				$coordinates[0],
+				$coordinates[1],
+				$coordinates[2],
+				$coordinates[3]
+			);
+			print "PEPA\t\t\t$DATAID\t$chain\t$resname\t$resnum\t$filename\n";
+		}
+	}
+	foreach my $combination (@$split_matched_lines_y) {
+		($chain, $resname, $resnum) = ('', '', '');
+		if ($combination) {
+			my $line = $combination->[0];
+			my @line_columns = split("\t", $line);
+			$resnum = $line_columns[16];
+			$resname = $line_columns[5];
+			$chain = $line_columns[6];
+			
+			# Extract coordinates for angle calculation
+			my @coordinates = ();
+			foreach my $line (@$combination) {
+				my @fields = split /\s+/, $line;
+				my ($x, $y, $z) = @fields[10, 11, 12];
+				push @coordinates, [$x, $y, $z];
+			}
+
+			my $angle2 = calculate_angle(
+				$coordinates[0],
+				$coordinates[1],
+				$coordinates[2],
+				$coordinates[3]
+			);
+
+			# Print the line for this combination
+			print "PEPA\t$angle1\t$angle2\t$DATAID\t$chain\t$resname" .
+				"\t$resnum\t$filename\n";
+		}
+	}
+}
+
+sub process_pdb_line {
+	my ($fh_in, $filename, $DATAID) = @_;
+	my $line = <$fh_in>;
+	my ($angle1, $angle2, $chain, $resname, $resnum) = (
+		'-', '-', '-', '-', '-'
+	);
+
+	my ($split_matched_lines_a, $split_matched_lines_y) =
+		extract_specific_atom_lines_pdb($fh_in);
+
+	my %residue_data;
+
+	foreach my $combination (@$split_matched_lines_a) {
+		my $line = $combination->[0];
+		my @line_columns = split("\t", $line);
+		my $resnum = $line_columns[5];
+		my $resname = $line_columns[3];
+		my $chain = $line_columns[4];
+		my $key = join(",", $chain, $resname, $resnum);
+
+		my @coordinates = map {
+			my @fields = split /\s+/, $_;
+			[$fields[6], $fields[7], $fields[8]]
+		} @$combination;
+
+		my $angle1 = calculate_angle(
+			$coordinates[0], 
+			$coordinates[1], 
+			$coordinates[2], 
+			$coordinates[3]
+		);
+
+		$residue_data{$key} = {
+			angle1 => $angle1,
+			angle2 => '-',
+			chain => $chain,
+			resname => $resname,
+			resnum => $resnum
+		};
+		}
+
+	foreach my $combination (@$split_matched_lines_y) {
+		my $line = $combination->[0];
+		my @line_columns = split("\t", $line);
+		my $resnum = $line_columns[5];
+		my $resname = $line_columns[3];
+		my $chain = $line_columns[4];
+		my $key = join(",", $chain, $resname, $resnum);
+
+		my @coordinates = map {
+			my @fields = split /\s+/, $_;
+			[$fields[6], $fields[7], $fields[8]]
+		} @$combination;
+
+		my $angle2 = calculate_angle(
+			$coordinates[0], 
+			$coordinates[1], 
+			$coordinates[2], 
+			$coordinates[3]
+		);
+
+		if (exists $residue_data{$key}) {
+			$residue_data{$key}{angle2} = $angle2;
+		} else {
+			$residue_data{$key} = {
+			angle1 => '-',
+			angle2 => $angle2,
+			chain => $chain,
+			resname => $resname,
+			resnum => $resnum
+			};
+		}
+	}
+
+	foreach my $key (sort keys %residue_data) {
+		my $data = $residue_data{$key};
+		print "PEPA\t$data->{angle1}\t$data->{angle2}\t$DATAID\t" .
+			"$data->{chain}\t$data->{resname}\t$data->{resnum}\t$filename\n";
+
+	}
+}
